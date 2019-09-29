@@ -17,18 +17,15 @@ from urllib.request import urlopen, urljoin, Request
 socket.setdefaulttimeout(10)
 
 # 线程数量
-THREAD_NUM = 4
-
-# 以记录的链接集合
-CRAWLED_URLS = set()
-
+thread_num = 4
+# 记录的已得到的链接
+crawled_urls = set()
 # URL队列
-URLS_Q = queue.Queue()
-
+urls_queue = queue.Queue()
 # 提取链接
-HREF_PAT = re.compile(r'(?<=href=\").*?(?=\")')
-
-HEADERS = {
+href_pat = re.compile(r'(?<=href=\").*?(?=\")')
+# 请求头
+headers = {
     'Connection':'keep-alive',
     'Referer':'http://www.sohu.com',
     'Accept-Language':'zh-CN,zh;q=0.8,en;q=0.6',
@@ -36,12 +33,12 @@ HEADERS = {
 }
 
 class Logging:
-    """一个异步进行记录的类
-    实例为可以进行调用的记录函数
-    """
+    """异步进行记录的类，类的实例为可以调用的记录函数 """
 
     def __init__(self, logfile):
         self.logfile = open(logfile, 'a')
+        self.logfile.write("# FORMAT: URL - DATE - ERROR\n")
+        self.err_num = 0
         self.lock = threading.Lock()
 
     def __del__(self):
@@ -52,7 +49,9 @@ class Logging:
         log = " - ".join([url, error, date]) + '\n'
         # print(log)
         with self.lock:
+            self.err_num += 1
             self.logfile.write(log)
+            self.logfile.flush()
 
     def __call__(self, url, error):
         thr = threading.Thread(target=self.__log, args=[url, error])
@@ -62,26 +61,28 @@ class Logging:
 log = Logging('url_error.log')
 
 
-class Crawler(threading.Thread):
+class Detector(threading.Thread):
 
     def __init__(self, queue):
-        super(Crawler, self).__init__()
+        super(Detector, self).__init__()
         self._queue = queue
 
     def open_url(self, url):
         """发送请求，如果链接可得，返回响应；否则记录错误信息"""
-        request = Request(url, headers=HEADERS)
+        request = Request(url, headers=headers)
         try:
             response = urlopen(request)
         except HTTPError as error:
-            log(url, str(error.reason))
+            log(url, str(error))
         except URLError as error:
-            log(url, str(error.reason))
+            log(url, repr(error))
         except:
             log(url, 'Unkown Error')
         else:
-            print("{:>10}{:>10}"\
-                    .format(URLS_Q.qsize(), len(CRAWLED_URLS)), end='\r')
+            log_format = ("Has been found: {:<8}"
+                          "Waiting for detection: {:<8} Error: {:>3}")
+            print(log_format.format(len(crawled_urls),
+                                    urls_queue.qsize(), log.err_num), end='\r')
             return response
 
 
@@ -92,22 +93,31 @@ class Crawler(threading.Thread):
         if response.headers.get('Content-Type').split(';')[0] != 'text/html':
             return
 
-        hrefs = HREF_PAT.finditer(str(response.read()))
+        try:
+            html = str(response.read())
+        except:
+            return
+        else:
+            hrefs = href_pat.finditer(html)
 
         for href in hrefs:
+            # print(href.group())
             new_url = urljoin(response.geturl(), href.group())
             if 'sohu.com' not in new_url:  # 不在范围
                 continue
             if new_url[0:4] != 'http':  # 去除mailto和Bookmarklet
                 continue
             new_url = new_url.split('#')[0]  # 去掉位置参数部分
-            if new_url not in CRAWLED_URLS:
-                CRAWLED_URLS.add(new_url)
+            if new_url not in crawled_urls:
+                # print(new_url)
+                crawled_urls.add(new_url)
                 self._queue.put(new_url)
 
     def run(self):
         while self._queue.qsize() > 0:
             url = self._queue.get()
+            if ' ' in url:
+                continue
 
             response = self.open_url(url)
             if response is None:
@@ -119,13 +129,14 @@ class Crawler(threading.Thread):
 
 
 if __name__ == '__main__':
-    URLS_Q.put('http://www.sohu.com')
+    urls_queue.put('http://www.sohu.com/')
+    crawled_urls.add('http://www.sohu.com/')
 
     threads = []
-    for i in range(THREAD_NUM):
-        c = Crawler(URLS_Q)
-        c.start()
-        threads.append(c)
+    for i in range(thread_num):
+        d = Detector(urls_queue)
+        d.start()
+        threads.append(d)
     for t in threads:
         t.join()
 
